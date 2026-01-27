@@ -2,6 +2,8 @@ import os
 import logging
 import sqlite3
 import requests
+from threading import Thread             # <--- NUEVO
+from flask import Flask                  # <--- NUEVO
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
@@ -77,6 +79,23 @@ def buscar_en_sql(busqueda):
     except Exception as e:
         return f"⚠️ Error interno: {e}"
 
+# --- NUEVO: EL SERVIDOR WEB PARA EL KEEP-ALIVE ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "🤖 Bot activo y escuchando."
+
+def run():
+    # Render asigna un puerto en la variable de entorno PORT
+    # Si no la encuentra, usa el 8080 por defecto
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+# ------------------------------------------------
 # --- 4. COMANDOS DEL BOT ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -101,11 +120,13 @@ async def reload_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 5. EJECUCIÓN PRINCIPAL ---
 if __name__ == '__main__':
-    # 1. Descargar DB al arrancar
-    if not descargar_db():
-        print("⚠️ ADVERTENCIA: Iniciando sin base de datos (se intentará descargar luego).")
+    # 1. ARRANCAMOS EL CORAZÓN WEB (Esto evita que Render cierre el servicio)
+    keep_alive()
 
-    # 2. Configurar Bot
+    # 2. Descargar DB al arrancar
+    if not descargar_db():
+        print("⚠️ ADVERTENCIA: Iniciando sin base de datos.")
+
     if not TOKEN:
         print("❌ ERROR CRÍTICO: No hay TOKEN configurado.")
         exit()
@@ -113,9 +134,8 @@ if __name__ == '__main__':
     application = ApplicationBuilder().token(TOKEN).build()
     
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('actualizar', reload_db)) # Comando extra
+    application.add_handler(CommandHandler('actualizar', reload_db))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
     print("🤖 Bot corriendo...")
     application.run_polling()
-
