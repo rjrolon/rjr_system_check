@@ -11,9 +11,9 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 DB_URL = os.getenv("DB_URL") 
 
 # Configuración interna (esto sí puedes editarlo aquí si cambia)
-NOMBRE_DB_LOCAL = "datos_descargados.db"
+NOMBRE_DB_LOCAL = "datos_seguros.db"
 NOMBRE_TABLA = "maestra"      # Debe coincidir con lo que pusiste en el convertidor
-COLUMNA_LLAVE = "CODIGO"      # La columna que usará para buscar (ej. DNI, SKU)
+COLUMNA_LLAVE = "id"      # La columna que usará para buscar (ej. DNI, SKU)
 
 # Logging (para ver errores en la consola de Render)
 logging.basicConfig(
@@ -118,3 +118,4 @@ if __name__ == '__main__':
     
     print("🤖 Bot corriendo...")
     application.run_polling()
+
