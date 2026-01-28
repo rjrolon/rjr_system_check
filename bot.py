@@ -1,8 +1,8 @@
 import os
+import math
 import logging
 import sqlite3
 import requests
-import math
 from threading import Thread
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,20 +15,22 @@ DB_URL = os.getenv("DB_URL")
 NOMBRE_DB_LOCAL = "datos_seguros.db"
 NOMBRE_TABLA = "maestra"      
 
-# ⚠️ CONFIGURACIÓN DE COLUMNAS (MANTÉN TUS NOMBRES AQUÍ)
+# ⚠️ CONFIGURACIÓN DE COLUMNAS (¡REVISA ESTO EN TU EXCEL!)
 COL_ID_PRINCIPAL = "id"       
 COL_APELLIDO     = "APELLIDO" 
 COL_NOMBRE       = "NOMBRE"   
 COL_DOMICILIO    = "domicilio"
+COL_SEXO         = "SEXO"     # <--- NUEVO: Nombre exacto columna Sexo
+COL_CLASE        = "CLASE"    # <--- NUEVO: Nombre exacto columna Clase (Año)
 
-RESULTADOS_POR_PAGINA = 5  # Cantidad de filas a mostrar por vez
+RESULTADOS_POR_PAGINA = 5 
 
 # --- SERVIDOR WEB (KEEP-ALIVE) ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "🤖 Bot activo con paginación."
+    return "🤖 Bot activo con Finder."
 
 def run():
     port = int(os.environ.get('PORT', 8080))
@@ -61,136 +63,186 @@ def descargar_db():
         logging.error(f"❌ Error descarga: {e}")
         return False
 
-# --- 3. MOTOR DE BÚSQUEDA CON PAGINACIÓN ---
-def obtener_datos_paginados(columna, valor, pagina=0):
-    """
-    Devuelve: (texto_resultado, tiene_mas_paginas)
-    Calculando el total de páginas (Ej: 1/5).
-    """
-    if not os.path.exists(NOMBRE_DB_LOCAL):
-        return "⚠️ La base de datos se está descargando...", False
+# --- 3. MOTORES DE BÚSQUEDA ---
 
+# A. Búsqueda Simple (Una sola columna)
+def obtener_datos_paginados(columna, valor, pagina=0):
+    if not os.path.exists(NOMBRE_DB_LOCAL): return "⚠️ Cargando DB...", False
     try:
         conn = sqlite3.connect(NOMBRE_DB_LOCAL)
         cursor = conn.cursor()
         
-        # --- PASO 1: Contar cuántos resultados existen en TOTAL ---
-        query_count = f"SELECT COUNT(*) FROM {NOMBRE_TABLA} WHERE {columna} LIKE ? COLLATE NOCASE"
-        cursor.execute(query_count, (f"%{valor}%",))
-        total_filas = cursor.fetchone()[0]
+        # Contar total
+        q_count = f"SELECT COUNT(*) FROM {NOMBRE_TABLA} WHERE {columna} LIKE ? COLLATE NOCASE"
+        cursor.execute(q_count, (f"%{valor}%",))
+        total = cursor.fetchone()[0]
         
-        if total_filas == 0:
+        if total == 0:
             conn.close()
-            return f"❌ No encontré coincidencias para '{valor}' en {columna}.", False
-
-        # Calculamos cuántas páginas salen (redondeando hacia arriba)
-        total_paginas = math.ceil(total_filas / RESULTADOS_POR_PAGINA)
+            return f"❌ Nada encontrado en {columna}.", False
         
-        # --- PASO 2: Traer solo los datos de la página actual ---
+        paginas_tot = math.ceil(total / RESULTADOS_POR_PAGINA)
         offset = pagina * RESULTADOS_POR_PAGINA
         
-        query_data = f"""
-            SELECT * FROM {NOMBRE_TABLA} 
-            WHERE {columna} LIKE ? COLLATE NOCASE 
-            LIMIT {RESULTADOS_POR_PAGINA} OFFSET {offset}
-        """
-        
-        cursor.execute(query_data, (f"%{valor}%",))
+        # Consultar datos
+        q_data = f"SELECT * FROM {NOMBRE_TABLA} WHERE {columna} LIKE ? COLLATE NOCASE LIMIT {RESULTADOS_POR_PAGINA} OFFSET {offset}"
+        cursor.execute(q_data, (f"%{valor}%",))
         filas = cursor.fetchall()
         headers = [d[0] for d in cursor.description]
         conn.close()
 
-        # --- PASO 3: Construir el mensaje con el contador "Pág X/Total" ---
-        mensaje = f"🔎 **Resultados para '{valor}'** (Pág {pagina + 1}/{total_paginas}):\n"
-        
+        mensaje = f"🔎 **Resultados '{valor}'** (Pág {pagina + 1}/{paginas_tot}):\n"
         for fila in filas:
             mensaje += "\n➖➖➖➖➖\n"
             for i in range(len(headers)):
-                dato = str(fila[i])
-                if dato and dato.lower() not in ['nan', 'none', '']:
-                    mensaje += f"🔹 *{headers[i]}:* {dato}\n"
+                d = str(fila[i])
+                if d and d.lower() not in ['nan', 'none', '']:
+                    mensaje += f"🔹 *{headers[i]}:* {d}\n"
         
-        # Determinar si hay más páginas para activar el botón "Siguiente"
-        tiene_mas = (pagina + 1) < total_paginas
-        
-        return mensaje, tiene_mas
-
+        return mensaje, (pagina + 1) < paginas_tot
     except Exception as e:
-        return f"⚠️ Error interno: {e}", False
+        return f"⚠️ Error: {e}", False
 
-# --- 4. MANEJO DE BOTONES ---
-def crear_teclado(columna, valor, pagina, tiene_mas):
-    botones = []
-    
-    # Botón Anterior (solo si no es la página 0)
-    if pagina > 0:
-        botones.append(InlineKeyboardButton("⬅️ Ant.", callback_data=f"{columna}|{valor}|{pagina-1}"))
-    
-    # Botón Siguiente (solo si hay más resultados)
-    if tiene_mas:
-        botones.append(InlineKeyboardButton("Sig. ➡️", callback_data=f"{columna}|{valor}|{pagina+1}"))
-    
-    if not botones:
-        return None
+# B. Búsqueda Combinada (FINDER: Sexo + Clase + Domicilio)
+def obtener_datos_combinados(sexo, clase, domicilio, pagina=0):
+    if not os.path.exists(NOMBRE_DB_LOCAL): return "⚠️ Cargando DB...", False
+    try:
+        conn = sqlite3.connect(NOMBRE_DB_LOCAL)
+        cursor = conn.cursor()
         
-    return InlineKeyboardMarkup([botones])
+        # Filtros: Sexo (=), Clase (=), Domicilio (LIKE)
+        # Usamos COLLATE NOCASE en domicilio, pero en Sexo/Clase solemos querer exactitud (o también nocase si prefieres)
+        condicion = f"{COL_SEXO} = ? AND {COL_CLASE} = ? AND {COL_DOMICILIO} LIKE ? COLLATE NOCASE"
+        params = (sexo, clase, f"%{domicilio}%")
 
-async def responder_busqueda(update, context, columna, valor, pagina=0, es_edicion=False):
-    # 1. Buscamos en SQL
+        # 1. Contar Total
+        cursor.execute(f"SELECT COUNT(*) FROM {NOMBRE_TABLA} WHERE {condicion}", params)
+        total = cursor.fetchone()[0]
+        
+        if total == 0:
+            conn.close()
+            return f"❌ Sin resultados para Sexo:{sexo}, Clase:{clase}, Dom:{domicilio}", False
+            
+        paginas_tot = math.ceil(total / RESULTADOS_POR_PAGINA)
+        offset = pagina * RESULTADOS_POR_PAGINA
+        
+        # 2. Traer Datos
+        q_data = f"SELECT * FROM {NOMBRE_TABLA} WHERE {condicion} LIMIT {RESULTADOS_POR_PAGINA} OFFSET {offset}"
+        cursor.execute(q_data, params)
+        filas = cursor.fetchall()
+        headers = [d[0] for d in cursor.description]
+        conn.close()
+
+        mensaje = f"🎯 **Finder: {sexo} | {clase} | {domicilio}**\n(Pág {pagina + 1}/{paginas_tot}):\n"
+        for fila in filas:
+            mensaje += "\n➖➖➖➖➖\n"
+            for i in range(len(headers)):
+                d = str(fila[i])
+                if d and d.lower() not in ['nan', 'none', '']:
+                    mensaje += f"🔹 *{headers[i]}:* {d}\n"
+        
+        return mensaje, (pagina + 1) < paginas_tot
+        
+    except Exception as e:
+        return f"⚠️ Error Finder: {e}", False
+
+# --- 4. MANEJO DE COMANDOS Y BOTONES ---
+
+# Helper para crear botones (Genérico)
+def crear_teclado(callback_prefix, datos_lista, pagina, tiene_mas):
+    """
+    callback_prefix: 'simple' o 'finder'
+    datos_lista: lista de valores a pasar en el callback
+    """
+    botones = []
+    # Convertimos lista de datos a string separado por |
+    data_str = "|".join(map(str, datos_lista))
+    
+    if pagina > 0:
+        botones.append(InlineKeyboardButton("⬅️ Ant.", callback_data=f"{callback_prefix}|{data_str}|{pagina-1}"))
+    if tiene_mas:
+        botones.append(InlineKeyboardButton("Sig. ➡️", callback_data=f"{callback_prefix}|{data_str}|{pagina+1}"))
+        
+    return InlineKeyboardMarkup([botones]) if botones else None
+
+# Respuesta Búsqueda Simple
+async def responder_busqueda(update, columna, valor, pagina=0, es_edicion=False):
     texto, tiene_mas = obtener_datos_paginados(columna, valor, pagina)
+    teclado = crear_teclado('simple', [columna, valor], pagina, tiene_mas)
     
-    # 2. Creamos los botones
-    teclado = crear_teclado(columna, valor, pagina, tiene_mas)
-    
-    # 3. Enviamos o Editamos el mensaje
     if es_edicion:
-        # Si viene de un clic en botón, editamos el mensaje existente
-        try:
-            await update.callback_query.edit_message_text(text=texto, parse_mode='Markdown', reply_markup=teclado)
-        except Exception:
-            pass # A veces da error si el mensaje es idéntico, lo ignoramos
+        try: await update.callback_query.edit_message_text(texto, parse_mode='Markdown', reply_markup=teclado)
+        except: pass
     else:
-        # Mensaje nuevo
         await update.message.reply_text(texto, parse_mode='Markdown', reply_markup=teclado)
 
-# --- 5. HANDLERS (COMANDOS) ---
+# Respuesta Búsqueda Finder
+async def responder_finder(update, sexo, clase, domicilio, pagina=0, es_edicion=False):
+    texto, tiene_mas = obtener_datos_combinados(sexo, clase, domicilio, pagina)
+    # Callback data será: finder|sexo|clase|domicilio|pagina
+    teclado = crear_teclado('finder', [sexo, clase, domicilio], pagina, tiene_mas)
+    
+    if es_edicion:
+        try: await update.callback_query.edit_message_text(texto, parse_mode='Markdown', reply_markup=teclado)
+        except: pass
+    else:
+        await update.message.reply_text(texto, parse_mode='Markdown', reply_markup=teclado)
 
-async def manejar_comando(update, context, columna_db):
+# --- HANDLERS ---
+
+async def cmd_finder(update, context):
+    args = context.args
+    # Esperamos al menos 3 argumentos: Sexo Clase Domicilio...
+    if len(args) < 3:
+        await update.message.reply_text("⚠️ Uso incorrecto.\nEjemplo: `/finder M 1990 San Martin`\n(Sexo Clase Domicilio)", parse_mode='Markdown')
+        return
+    
+    sexo = args[0]
+    clase = args[1]
+    domicilio = " ".join(args[2:]) # Une el resto de palabras como domicilio
+    
+    await responder_finder(update, sexo, clase, domicilio, 0)
+
+async def manejar_comando_simple(update, context, columna_db):
     if not context.args:
         await update.message.reply_text("⚠️ Escribe algo para buscar.")
         return
     busqueda = " ".join(context.args)
-    await responder_busqueda(update, context, columna_db, busqueda, pagina=0)
+    await responder_busqueda(update, columna_db, busqueda, 0)
 
-async def cmd_apellido(update, context): await manejar_comando(update, context, COL_APELLIDO)
-async def cmd_nombre(update, context): await manejar_comando(update, context, COL_NOMBRE)
-async def cmd_domicilio(update, context): await manejar_comando(update, context, COL_DOMICILIO)
+async def cmd_apellido(u, c): await manejar_comando_simple(u, c, COL_APELLIDO)
+async def cmd_nombre(u, c): await manejar_comando_simple(u, c, COL_NOMBRE)
+async def cmd_domicilio(u, c): await manejar_comando_simple(u, c, COL_DOMICILIO)
 
-async def buscar_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = update.message.text
-    await responder_busqueda(update, context, COL_ID_PRINCIPAL, texto, pagina=0)
+async def buscar_general(update, context):
+    await responder_busqueda(update, COL_ID_PRINCIPAL, update.message.text, 0)
 
-async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja los clics en los botones Anterior/Siguiente"""
+async def boton_callback(update, context):
     query = update.callback_query
-    await query.answer() # Avisar a Telegram que recibimos el clic
+    await query.answer()
     
-    # Recuperamos los datos del botón: "COLUMNA|VALOR|PAGINA"
     datos = query.data.split('|')
-    columna = datos[0]
-    valor = datos[1]
-    pagina = int(datos[2])
+    tipo = datos[0]
     
-    await responder_busqueda(update, context, columna, valor, pagina, es_edicion=True)
+    if tipo == 'simple':
+        # simple|columna|valor|pagina
+        col, val, pag = datos[1], datos[2], int(datos[3])
+        await responder_busqueda(update, col, val, pag, es_edicion=True)
+        
+    elif tipo == 'finder':
+        # finder|sexo|clase|domicilio|pagina
+        sex, cla, dom, pag = datos[1], datos[2], datos[3], int(datos[4])
+        await responder_finder(update, sex, cla, dom, pag, es_edicion=True)
 
 async def start(update, context):
-    await update.message.reply_text("👋 Bot Activo.\nUsa /apellido, /nombre, /domicilio o envía un ID.")
+    msg = "👋 **Bot Activo**\n\n🔎 /apellido [val]\n🔎 /nombre [val]\n🔎 /domicilio [val]\n🎯 /finder [sexo] [clase] [domicilio]\n\nO envía un ID directo."
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def reload_db(update, context):
     if descargar_db(): await update.message.reply_text("✅ Actualizado.")
     else: await update.message.reply_text("❌ Error.")
 
-# --- 6. ARRANQUE ---
+# --- ARRANQUE ---
 if __name__ == '__main__':
     keep_alive()
     if not descargar_db(): print("⚠️ Sin DB inicial")
@@ -202,11 +254,10 @@ if __name__ == '__main__':
     app_bot.add_handler(CommandHandler('apellido', cmd_apellido))
     app_bot.add_handler(CommandHandler('nombre', cmd_nombre))
     app_bot.add_handler(CommandHandler('domicilio', cmd_domicilio))
+    app_bot.add_handler(CommandHandler('finder', cmd_finder)) # <--- NUEVO COMANDO
     
-    # Handler para los botones
     app_bot.add_handler(CallbackQueryHandler(boton_callback))
-    
     app_bot.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), buscar_general))
     
-    print("🤖 Bot con Paginación LISTO")
+    print("🤖 Bot Finder LISTO")
     app_bot.run_polling()
