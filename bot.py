@@ -20,7 +20,7 @@ NOMBRE_TABLA = "maestra"
 COL_ID_PRINCIPAL = "id"       # Para la búsqueda directa por número
 COL_APELLIDO     = "APELLIDO" # Columna donde buscar apellidos
 COL_NOMBRE       = "NOMBRE"   # Columna donde buscar nombres
-COL_DOMICILIO    = "DIRECCION" # Columna donde buscar domicilios
+COL_DOMICILIO    = "domicilio" # Columna donde buscar domicilios
 
 # --- SERVIDOR WEB (KEEP-ALIVE) ---
 app = Flask('')
