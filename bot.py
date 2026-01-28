@@ -30,7 +30,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "🤖 Bot activo v4."
+    return "🤖 Bot activo v5 (ASC)."
 
 def run():
     port = int(os.environ.get('PORT', 8080))
@@ -108,7 +108,6 @@ def obtener_datos_combinados(sexo, clase, domicilio, pagina=0):
         conn = sqlite3.connect(NOMBRE_DB_LOCAL)
         cursor = conn.cursor()
         
-        # AQUI ESTÁ EL CAMBIO: Agregamos COLLATE NOCASE a todo para que 'f'='F'
         condicion = f"{COL_SEXO} = ? COLLATE NOCASE AND {COL_CLASE} = ? COLLATE NOCASE AND {COL_DOMICILIO} LIKE ? COLLATE NOCASE"
         params = (sexo, clase, f"%{domicilio}%")
 
@@ -140,14 +139,13 @@ def obtener_datos_combinados(sexo, clase, domicilio, pagina=0):
     except Exception as e:
         return f"⚠️ Error Finder: {e}", False
 
-# C. NUEVO: Búsqueda Persona (Apellido + Nombre)
+# C. Búsqueda Persona (Apellido + Nombre)
 def obtener_datos_persona(apellido, nombre, pagina=0):
     if not os.path.exists(NOMBRE_DB_LOCAL): return "⚠️ Cargando DB...", False
     try:
         conn = sqlite3.connect(NOMBRE_DB_LOCAL)
         cursor = conn.cursor()
         
-        # Buscamos coincidencias parciales en AMBOS campos
         condicion = f"{COL_APELLIDO} LIKE ? COLLATE NOCASE AND {COL_NOMBRE} LIKE ? COLLATE NOCASE"
         params = (f"%{apellido}%", f"%{nombre}%")
 
@@ -179,6 +177,45 @@ def obtener_datos_persona(apellido, nombre, pagina=0):
     except Exception as e:
         return f"⚠️ Error Persona: {e}", False
 
+# D. NUEVO: Búsqueda ASC (Sexo + Clase + Apellido)
+def obtener_datos_asc(sexo, clase, apellido, pagina=0):
+    if not os.path.exists(NOMBRE_DB_LOCAL): return "⚠️ Cargando DB...", False
+    try:
+        conn = sqlite3.connect(NOMBRE_DB_LOCAL)
+        cursor = conn.cursor()
+        
+        # Filtros: Sexo (=), Clase (=), Apellido (LIKE)
+        condicion = f"{COL_SEXO} = ? COLLATE NOCASE AND {COL_CLASE} = ? COLLATE NOCASE AND {COL_APELLIDO} LIKE ? COLLATE NOCASE"
+        params = (sexo, clase, f"%{apellido}%")
+
+        cursor.execute(f"SELECT COUNT(*) FROM {NOMBRE_TABLA} WHERE {condicion}", params)
+        total = cursor.fetchone()[0]
+        
+        if total == 0:
+            conn.close()
+            return f"❌ Sin resultados ASC.", False
+            
+        paginas_tot = math.ceil(total / RESULTADOS_POR_PAGINA)
+        offset = pagina * RESULTADOS_POR_PAGINA
+        
+        q_data = f"SELECT * FROM {NOMBRE_TABLA} WHERE {condicion} LIMIT {RESULTADOS_POR_PAGINA} OFFSET {offset}"
+        cursor.execute(q_data, params)
+        filas = cursor.fetchall()
+        headers = [d[0] for d in cursor.description]
+        conn.close()
+
+        mensaje = f"🧬 **ASC: {sexo}|{clase}|{apellido}** (Pág {pagina + 1}/{paginas_tot}):\n"
+        for fila in filas:
+            mensaje += "\n➖➖➖➖➖\n"
+            for i in range(len(headers)):
+                d = str(fila[i])
+                if d and d.lower() not in ['nan', 'none', '']:
+                    mensaje += f"🔹 *{headers[i]}:* {d}\n"
+        
+        return mensaje, (pagina + 1) < paginas_tot
+    except Exception as e:
+        return f"⚠️ Error ASC: {e}", False
+
 # --- 4. MANEJO DE COMANDOS Y BOTONES ---
 
 def crear_teclado(prefix, datos, pagina, tiene_mas):
@@ -205,6 +242,11 @@ async def responder_persona(update, apellido, nombre, pagina=0, es_edicion=False
     teclado = crear_teclado('persona', [apellido, nombre], pagina, tiene_mas)
     await enviar_respuesta(update, texto, teclado, es_edicion)
 
+async def responder_asc(update, sexo, clase, apellido, pagina=0, es_edicion=False):
+    texto, tiene_mas = obtener_datos_asc(sexo, clase, apellido, pagina)
+    teclado = crear_teclado('asc', [sexo, clase, apellido], pagina, tiene_mas)
+    await enviar_respuesta(update, texto, teclado, es_edicion)
+
 async def enviar_respuesta(update, texto, teclado, es_edicion):
     if es_edicion:
         try: await update.callback_query.edit_message_text(texto, parse_mode='Markdown', reply_markup=teclado)
@@ -214,12 +256,21 @@ async def enviar_respuesta(update, texto, teclado, es_edicion):
 
 # --- HANDLERS ---
 
+async def cmd_asc(update, context):
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text("⚠️ Uso: `/asc [Sexo] [Clase] [Apellido]`\nEj: `/asc M 1980 Perez`", parse_mode='Markdown')
+        return
+    sexo = args[0]
+    clase = args[1]
+    apellido = " ".join(args[2:]) 
+    await responder_asc(update, sexo, clase, apellido, 0)
+
 async def cmd_persona(update, context):
     args = context.args
     if len(args) < 2:
         await update.message.reply_text("⚠️ Uso: `/persona [Apellido] [Nombre]`\nEj: `/persona Gomez Juan`", parse_mode='Markdown')
         return
-    # Asumimos que la primera palabra es el Apellido y el resto el Nombre
     apellido = args[0]
     nombre = " ".join(args[1:]) 
     await responder_persona(update, apellido, nombre, 0)
@@ -229,7 +280,7 @@ async def cmd_finder(update, context):
     if len(args) < 3:
         await update.message.reply_text("⚠️ Uso: `/finder [Sexo] [Clase] [Domicilio]`", parse_mode='Markdown')
         return
-    sexo = args[0] # Al tener COLLATE NOCASE en SQL, ya no importa si es 'f' o 'F'
+    sexo = args[0]
     clase = args[1]
     domicilio = " ".join(args[2:])
     await responder_finder(update, sexo, clase, domicilio, 0)
@@ -259,16 +310,19 @@ async def boton_callback(update, context):
     elif tipo == 'finder':
         await responder_finder(update, datos[1], datos[2], datos[3], int(datos[4]), True)
     elif tipo == 'persona':
-        # persona|apellido|nombre|pagina
         await responder_persona(update, datos[1], datos[2], int(datos[3]), True)
+    elif tipo == 'asc':
+        # asc|sexo|clase|apellido|pagina
+        await responder_asc(update, datos[1], datos[2], datos[3], int(datos[4]), True)
 
 async def start(update, context):
     msg = (
-        "👋 **Bot Activo**\n\n"
+        "👋 **Bot Activo v5**\n\n"
         "🔎 /apellido [val]\n"
         "🔎 /nombre [val]\n"
         "👤 /persona [Apellido] [Nombre]\n"
         "🎯 /finder [S] [Clase] [Dom]\n"
+        "🧬 /asc [S] [Clase] [Apellido]\n"
         "🏠 /domicilio [val]"
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
@@ -290,10 +344,11 @@ if __name__ == '__main__':
     app_bot.add_handler(CommandHandler('nombre', cmd_nombre))
     app_bot.add_handler(CommandHandler('domicilio', cmd_domicilio))
     app_bot.add_handler(CommandHandler('finder', cmd_finder))
-    app_bot.add_handler(CommandHandler('persona', cmd_persona)) # <--- COMANDO NUEVO
+    app_bot.add_handler(CommandHandler('persona', cmd_persona))
+    app_bot.add_handler(CommandHandler('asc', cmd_asc)) # <--- COMANDO ASC REGISTRADO
     
     app_bot.add_handler(CallbackQueryHandler(boton_callback))
     app_bot.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), buscar_general))
     
-    print("🤖 Bot v4 LISTO")
+    print("🤖 Bot v5 LISTO")
     app_bot.run_polling()
