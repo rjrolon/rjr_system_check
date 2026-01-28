@@ -2,6 +2,7 @@ import os
 import logging
 import sqlite3
 import requests
+import math
 from threading import Thread
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -64,43 +65,44 @@ def descargar_db():
 def obtener_datos_paginados(columna, valor, pagina=0):
     """
     Devuelve: (texto_resultado, tiene_mas_paginas)
+    Calculando el total de páginas (Ej: 1/5).
     """
     if not os.path.exists(NOMBRE_DB_LOCAL):
-        return "⚠️ DB no cargada.", False
+        return "⚠️ La base de datos se está descargando...", False
 
     try:
         conn = sqlite3.connect(NOMBRE_DB_LOCAL)
         cursor = conn.cursor()
         
-        # Calcular el "salto" (offset)
+        # --- PASO 1: Contar cuántos resultados existen en TOTAL ---
+        query_count = f"SELECT COUNT(*) FROM {NOMBRE_TABLA} WHERE {columna} LIKE ? COLLATE NOCASE"
+        cursor.execute(query_count, (f"%{valor}%",))
+        total_filas = cursor.fetchone()[0]
+        
+        if total_filas == 0:
+            conn.close()
+            return f"❌ No encontré coincidencias para '{valor}' en {columna}.", False
+
+        # Calculamos cuántas páginas salen (redondeando hacia arriba)
+        total_paginas = math.ceil(total_filas / RESULTADOS_POR_PAGINA)
+        
+        # --- PASO 2: Traer solo los datos de la página actual ---
         offset = pagina * RESULTADOS_POR_PAGINA
         
-        # Traemos 1 resultado extra (LIMIT + 1) para saber si hay página siguiente
-        query = f"""
+        query_data = f"""
             SELECT * FROM {NOMBRE_TABLA} 
             WHERE {columna} LIKE ? COLLATE NOCASE 
-            LIMIT {RESULTADOS_POR_PAGINA + 1} OFFSET {offset}
+            LIMIT {RESULTADOS_POR_PAGINA} OFFSET {offset}
         """
         
-        cursor.execute(query, (f"%{valor}%",))
+        cursor.execute(query_data, (f"%{valor}%",))
         filas = cursor.fetchall()
         headers = [d[0] for d in cursor.description]
         conn.close()
 
-        if not filas:
-            if pagina == 0:
-                return f"❌ No encontré '{valor}' en {columna}.", False
-            else:
-                return "End", False # Caso raro
-
-        # Verificamos si hay página siguiente
-        tiene_mas = False
-        if len(filas) > RESULTADOS_POR_PAGINA:
-            tiene_mas = True
-            filas = filas[:RESULTADOS_POR_PAGINA] # Cortamos el extra que pedimos
-
-        # Construir Mensaje
-        mensaje = f"🔎 **Resultados para '{valor}'** (Pág {pagina + 1}):\n"
+        # --- PASO 3: Construir el mensaje con el contador "Pág X/Total" ---
+        mensaje = f"🔎 **Resultados para '{valor}'** (Pág {pagina + 1}/{total_paginas}):\n"
+        
         for fila in filas:
             mensaje += "\n➖➖➖➖➖\n"
             for i in range(len(headers)):
@@ -108,10 +110,13 @@ def obtener_datos_paginados(columna, valor, pagina=0):
                 if dato and dato.lower() not in ['nan', 'none', '']:
                     mensaje += f"🔹 *{headers[i]}:* {dato}\n"
         
+        # Determinar si hay más páginas para activar el botón "Siguiente"
+        tiene_mas = (pagina + 1) < total_paginas
+        
         return mensaje, tiene_mas
 
     except Exception as e:
-        return f"⚠️ Error: {e}", False
+        return f"⚠️ Error interno: {e}", False
 
 # --- 4. MANEJO DE BOTONES ---
 def crear_teclado(columna, valor, pagina, tiene_mas):
