@@ -4,30 +4,30 @@ import sqlite3
 import requests
 from threading import Thread
 from flask import Flask
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
-# --- 1. CONFIGURACIÓN Y VARIABLES DE ENTORNO ---
+# --- 1. CONFIGURACIÓN Y VARIABLES ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 DB_URL = os.getenv("DB_URL") 
 
-# Configuración de Archivos
 NOMBRE_DB_LOCAL = "datos_seguros.db"
 NOMBRE_TABLA = "maestra"      
 
-# --- ⚠️ CONFIGURACIÓN DE COLUMNAS (¡EDITA ESTO!) ---
-# Pon aquí el nombre EXACTO del encabezado en tu Excel para cada tipo de búsqueda
-COL_ID_PRINCIPAL = "id"       # Para la búsqueda directa por número
-COL_APELLIDO     = "APELLIDO" # Columna donde buscar apellidos
-COL_NOMBRE       = "NOMBRE"   # Columna donde buscar nombres
-COL_DOMICILIO    = "domicilio" # Columna donde buscar domicilios
+# ⚠️ CONFIGURACIÓN DE COLUMNAS (MANTÉN TUS NOMBRES AQUÍ)
+COL_ID_PRINCIPAL = "id"       
+COL_APELLIDO     = "APELLIDO" 
+COL_NOMBRE       = "NOMBRE"   
+COL_DOMICILIO    = "domicilio"
+
+RESULTADOS_POR_PAGINA = 5  # Cantidad de filas a mostrar por vez
 
 # --- SERVIDOR WEB (KEEP-ALIVE) ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "🤖 Bot activo y escuchando."
+    return "🤖 Bot activo con paginación."
 
 def run():
     port = int(os.environ.get('PORT', 8080))
@@ -43,148 +43,165 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# --- 2. GESTIÓN DE BASE DE DATOS ---
+# --- 2. GESTIÓN BASE DE DATOS ---
 def descargar_db():
     if not DB_URL:
-        logging.error("❌ ERROR: No encontré la variable DB_URL.")
+        logging.error("❌ Falta DB_URL")
         return False
-    logging.info("⏳ Descargando base de datos...")
     try:
         r = requests.get(DB_URL, allow_redirects=True)
         if r.status_code == 200:
             with open(NOMBRE_DB_LOCAL, 'wb') as f:
                 f.write(r.content)
-            logging.info("✅ Base de datos descargada.")
+            logging.info("✅ DB Descargada.")
             return True
-        else:
-            logging.error(f"❌ Error descarga: {r.status_code}")
-            return False
+        return False
     except Exception as e:
-        logging.error(f"❌ Excepción: {e}")
+        logging.error(f"❌ Error descarga: {e}")
         return False
 
-def ejecutar_busqueda(columna, valor):
+# --- 3. MOTOR DE BÚSQUEDA CON PAGINACIÓN ---
+def obtener_datos_paginados(columna, valor, pagina=0):
     """
-    Busca coincidencias parciales (LIKE %valor%) y devuelve hasta 5 resultados.
+    Devuelve: (texto_resultado, tiene_mas_paginas)
     """
     if not os.path.exists(NOMBRE_DB_LOCAL):
-        return "⚠️ La base de datos se está descargando, intenta en unos segundos."
+        return "⚠️ DB no cargada.", False
 
     try:
         conn = sqlite3.connect(NOMBRE_DB_LOCAL)
         cursor = conn.cursor()
         
-        # SQL: LIKE %valor% permite encontrar texto en cualquier parte de la celda
-        # COLLATE NOCASE hace que no importen mayúsculas/minúsculas
-        query = f"SELECT * FROM {NOMBRE_TABLA} WHERE {columna} LIKE ? COLLATE NOCASE LIMIT 5"
+        # Calcular el "salto" (offset)
+        offset = pagina * RESULTADOS_POR_PAGINA
+        
+        # Traemos 1 resultado extra (LIMIT + 1) para saber si hay página siguiente
+        query = f"""
+            SELECT * FROM {NOMBRE_TABLA} 
+            WHERE {columna} LIKE ? COLLATE NOCASE 
+            LIMIT {RESULTADOS_POR_PAGINA + 1} OFFSET {offset}
+        """
         
         cursor.execute(query, (f"%{valor}%",))
         filas = cursor.fetchall()
-        
-        # Nombres de columnas para el formato
         headers = [d[0] for d in cursor.description]
         conn.close()
-        
-        if not filas:
-            return f"❌ No encontré coincidencias para: *{valor}* en la columna *{columna}*."
 
-        # Construir respuesta con múltiples resultados
-        mensaje_final = f"🔎 **Encontré {len(filas)} coincidencias:**\n"
-        
+        if not filas:
+            if pagina == 0:
+                return f"❌ No encontré '{valor}' en {columna}.", False
+            else:
+                return "End", False # Caso raro
+
+        # Verificamos si hay página siguiente
+        tiene_mas = False
+        if len(filas) > RESULTADOS_POR_PAGINA:
+            tiene_mas = True
+            filas = filas[:RESULTADOS_POR_PAGINA] # Cortamos el extra que pedimos
+
+        # Construir Mensaje
+        mensaje = f"🔎 **Resultados para '{valor}'** (Pág {pagina + 1}):\n"
         for fila in filas:
-            mensaje_final += "\n➖➖➖➖➖➖➖➖➖➖\n"
+            mensaje += "\n➖➖➖➖➖\n"
             for i in range(len(headers)):
-                # Filtramos columnas vacías para que no ocupe espacio visual
                 dato = str(fila[i])
-                if dato and dato.lower() != 'nan' and dato.lower() != 'none':
-                    mensaje_final += f"🔹 *{headers[i]}:* {dato}\n"
-                    
-        return mensaje_final
+                if dato and dato.lower() not in ['nan', 'none', '']:
+                    mensaje += f"🔹 *{headers[i]}:* {dato}\n"
+        
+        return mensaje, tiene_mas
 
     except Exception as e:
-        return f"⚠️ Error interno de búsqueda: {e}"
+        return f"⚠️ Error: {e}", False
 
-# --- 3. MANEJADORES DE COMANDOS ---
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "👋 **¡Bot Financiero Activo!**\n\n"
-        "Comandos disponibles:\n"
-        "🆔 Envíame un ID/Código directo para buscar.\n"
-        "👤 /apellido [texto] -> Busca por apellido\n"
-        "📝 /nombre [texto] -> Busca por nombre\n"
-        "🏠 /domicilio [texto] -> Busca por dirección\n"
-        "🔄 /actualizar -> Recarga la base de datos"
-    )
-    await update.message.reply_text(msg, parse_mode='Markdown')
-
-# Función genérica para manejar los comandos de búsqueda
-async def manejar_comando_busqueda(update: Update, context: ContextTypes.DEFAULT_TYPE, columna_db):
-    if not context.args:
-        await update.message.reply_text("⚠️ Debes escribir algo para buscar. Ej: /apellido Perez")
-        return
+# --- 4. MANEJO DE BOTONES ---
+def crear_teclado(columna, valor, pagina, tiene_mas):
+    botones = []
     
-    # Unimos todo lo que escribió el usuario (ej: "De la Cruz")
-    busqueda = " ".join(context.args)
+    # Botón Anterior (solo si no es la página 0)
+    if pagina > 0:
+        botones.append(InlineKeyboardButton("⬅️ Ant.", callback_data=f"{columna}|{valor}|{pagina-1}"))
     
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
-    respuesta = ejecutar_busqueda(columna_db, busqueda)
+    # Botón Siguiente (solo si hay más resultados)
+    if tiene_mas:
+        botones.append(InlineKeyboardButton("Sig. ➡️", callback_data=f"{columna}|{valor}|{pagina+1}"))
     
-    # Telegram corta mensajes muy largos (4096 caracteres), enviamos con cuidado
-    if len(respuesta) > 4000:
-        respuesta = respuesta[:4000] + "\n\n⚠️ (Mensaje cortado por límite de longitud)..."
+    if not botones:
+        return None
         
-    await update.message.reply_text(respuesta, parse_mode='Markdown')
+    return InlineKeyboardMarkup([botones])
 
-# Wrappers para cada comando específico
-async def cmd_apellido(update, context):
-    await manejar_comando_busqueda(update, context, COL_APELLIDO)
+async def responder_busqueda(update, context, columna, valor, pagina=0, es_edicion=False):
+    # 1. Buscamos en SQL
+    texto, tiene_mas = obtener_datos_paginados(columna, valor, pagina)
+    
+    # 2. Creamos los botones
+    teclado = crear_teclado(columna, valor, pagina, tiene_mas)
+    
+    # 3. Enviamos o Editamos el mensaje
+    if es_edicion:
+        # Si viene de un clic en botón, editamos el mensaje existente
+        try:
+            await update.callback_query.edit_message_text(text=texto, parse_mode='Markdown', reply_markup=teclado)
+        except Exception:
+            pass # A veces da error si el mensaje es idéntico, lo ignoramos
+    else:
+        # Mensaje nuevo
+        await update.message.reply_text(texto, parse_mode='Markdown', reply_markup=teclado)
 
-async def cmd_nombre(update, context):
-    await manejar_comando_busqueda(update, context, COL_NOMBRE)
+# --- 5. HANDLERS (COMANDOS) ---
 
-async def cmd_domicilio(update, context):
-    await manejar_comando_busqueda(update, context, COL_DOMICILIO)
+async def manejar_comando(update, context, columna_db):
+    if not context.args:
+        await update.message.reply_text("⚠️ Escribe algo para buscar.")
+        return
+    busqueda = " ".join(context.args)
+    await responder_busqueda(update, context, columna_db, busqueda, pagina=0)
+
+async def cmd_apellido(update, context): await manejar_comando(update, context, COL_APELLIDO)
+async def cmd_nombre(update, context): await manejar_comando(update, context, COL_NOMBRE)
+async def cmd_domicilio(update, context): await manejar_comando(update, context, COL_DOMICILIO)
 
 async def buscar_general(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Si el usuario escribe texto suelto, busca por ID/Código Principal"""
     texto = update.message.text
-    # Reutilizamos la lógica pero buscando coincidencia exacta o parcial en la ID
-    # Aquí puedes decidir si quieres LIKE o exacto (=). Dejo LIKE para flexibilidad.
-    respuesta = ejecutar_busqueda(COL_ID_PRINCIPAL, texto)
-    await update.message.reply_text(respuesta, parse_mode='Markdown')
+    await responder_busqueda(update, context, COL_ID_PRINCIPAL, texto, pagina=0)
 
-async def reload_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if descargar_db():
-        await update.message.reply_text("✅ Base de datos actualizada.")
-    else:
-        await update.message.reply_text("❌ Error al actualizar.")
+async def boton_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja los clics en los botones Anterior/Siguiente"""
+    query = update.callback_query
+    await query.answer() # Avisar a Telegram que recibimos el clic
+    
+    # Recuperamos los datos del botón: "COLUMNA|VALOR|PAGINA"
+    datos = query.data.split('|')
+    columna = datos[0]
+    valor = datos[1]
+    pagina = int(datos[2])
+    
+    await responder_busqueda(update, context, columna, valor, pagina, es_edicion=True)
 
-# --- 4. ARRANQUE ---
+async def start(update, context):
+    await update.message.reply_text("👋 Bot Activo.\nUsa /apellido, /nombre, /domicilio o envía un ID.")
+
+async def reload_db(update, context):
+    if descargar_db(): await update.message.reply_text("✅ Actualizado.")
+    else: await update.message.reply_text("❌ Error.")
+
+# --- 6. ARRANQUE ---
 if __name__ == '__main__':
     keep_alive()
-
-    # Intento de descarga inicial
-    if not descargar_db():
-        print("⚠️ Iniciando sin DB...")
-
-    if not TOKEN:
-        print("❌ ERROR: Falta TELEGRAM_TOKEN")
-        exit()
-
+    if not descargar_db(): print("⚠️ Sin DB inicial")
+    
     app_bot = ApplicationBuilder().token(TOKEN).build()
     
-    # Registramos los comandos
     app_bot.add_handler(CommandHandler('start', start))
     app_bot.add_handler(CommandHandler('actualizar', reload_db))
-    
-    # Nuevos comandos de búsqueda
     app_bot.add_handler(CommandHandler('apellido', cmd_apellido))
     app_bot.add_handler(CommandHandler('nombre', cmd_nombre))
     app_bot.add_handler(CommandHandler('domicilio', cmd_domicilio))
     
-    # Mensaje normal (busca por ID)
+    # Handler para los botones
+    app_bot.add_handler(CallbackQueryHandler(boton_callback))
+    
     app_bot.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), buscar_general))
     
-    print("🤖 Bot con búsqueda avanzada corriendo...")
+    print("🤖 Bot con Paginación LISTO")
     app_bot.run_polling()
